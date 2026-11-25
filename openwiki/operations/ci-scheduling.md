@@ -15,8 +15,12 @@ tags:
     pmset,
   ]
 sources:
+  - id: openwiki-source-3c0400fdd30d346d70175158
+    resource: repo://.changeset/quiet-gitlab-credentials.md
   - id: openwiki-source-6d4b4e707b8d60b6ccfa3425
     resource: repo://.github/workflows/openwiki-update.yml
+  - id: openwiki-source-03e6ffdf1f1f34d1be5951da
+    resource: repo://.trivyignore
   - id: openwiki-source-aef084bf3022fb942ad29b90
     resource: repo://examples/openwiki-update-auto-merge.yml
   - id: openwiki-source-0f426585cfb8a1150869ea30
@@ -35,12 +39,14 @@ sources:
     resource: repo://src/config/constants.ts
   - id: openwiki-source-c923e23504de7a6af7799a24
     resource: repo://src/scheduling/schedules.ts
+  - id: openwiki-source-619574be5673e1bc96e66fd0
+    resource: repo://test/gitlab-example-security.test.ts
   - id: openwiki-source-7cf549510278a62e11ae8280
     resource: repo://test/scheduling/schedules.test.ts
-generated: { by: "openwiki/0.7.1", at: "2026-10-07T08:10:39.081Z" }
+generated: { by: "openwiki/0.9.0", at: "2026-11-25T08:06:10.482Z" }
 verified:
-  - by: openwiki/0.7.3
-    at: 2026-11-02T08:07:01.639Z
+  - by: openwiki/0.9.0
+    at: 2026-11-25T08:06:10.482Z
 ---
 
 # CI Scheduling and Self-Update
@@ -227,6 +233,48 @@ and the workflow file), branched under `openwiki/update` (GitHub) or
 in the GitLab and Bitbucket examples lists the fixed path set including the
 workflow file.
 
+#### GitLab push authentication
+
+The Bitbucket and GitLab examples differ in how they authenticate the push. The
+Bitbucket example embeds the token in the remote URL
+(`https://x-token-auth:${OPENWIKI_BITBUCKET_TOKEN}@bitbucket.org/...`). The GitLab
+example deliberately avoids that pattern: per
+[.changeset/quiet-gitlab-credentials.md](../../.changeset/quiet-gitlab-credentials.md),
+push credentials cannot persist in remote URLs or appear under shell tracing.
+Instead, before pushing, the script runs `set +x` to disable shell tracing while
+the temporary helper can read the token, creates an ephemeral credential helper
+with `mktemp`, `chmod 700`, and a quoted heredoc (`<<'EOF'`) whose `get` case
+prints `username=oauth2` and `password=$OPENWIKI_GITLAB_TOKEN`, and pushes with
+
+```sh
+git -c credential.helper= -c credential.helper="$credential_helper" \
+  push "https://${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" "$OPENWIKI_BRANCH"
+```
+
+so the `OPENWIKI_GITLAB_TOKEN` never persists in the remote URL and never appears
+under shell tracing. `trap rm -f "$credential_helper" EXIT` and a trailing
+`rm -f "$credential_helper"` (followed by `trap - EXIT`) clean up the helper. The
+merge request is then opened through the GitLab REST API with the
+`PRIVATE-TOKEN` header.
+
+```mermaid
+sequenceDiagram
+    participant S as script
+    participant H as credential helper
+    participant G as git push
+    participant R as GitLab remote
+    S->>S: set +x disable shell tracing
+    S->>H: mktemp, chmod 700, write heredoc get case
+    S->>G: git push with credential.helper="$credential_helper"
+    G->>H: request credentials
+    H-->>G: username=oauth2, password=$OPENWIKI_GITLAB_TOKEN
+    G->>R: push https://${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git
+    S->>S: rm -f "$credential_helper", trap - EXIT
+    S->>R: POST merge_request via PRIVATE-TOKEN header
+```
+
+GitLab CI push flow using an ephemeral credential helper.
+
 The GitHub example also models a **failure-tolerant** run. The `openwiki code
 --update` step sets `continue-on-error: true` so a failed generation does not
 abort the job; the PR step still runs (`if: ${{ !cancelled() }}`) and its body
@@ -391,6 +439,17 @@ The shared LangSmith thread grouping that gives one trace thread per update is
 pinned by the repository-runner suite, not the scheduling suite; see
 [repository generation](../workflows/repository-generation.md) and
 [testing overview](../testing/overview.md) for those tests.
+
+The GitLab CI example's credential-helper hardening is pinned by
+`test/gitlab-example-security.test.ts`, the focused test accompanying this
+change. It parses the example YAML, asserts the script is an array, asserts the
+example contains no `https?://[^/\s]+@` URL (no embedded `user@host` token in
+the remote URL), and asserts the presence of `set +x`,
+`credential.helper="$credential_helper"`, the quoted heredoc `<<'EOF'`, the
+`$OPENWIKI_GITLAB_TOKEN` reference, and the push URL
+`push "https://${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git"`. The accompanying
+`.trivyignore` entries document the temporary supply-chain exceptions that this
+hardening and other glob/brace guardrails sit alongside.
 
 ## Related pages
 

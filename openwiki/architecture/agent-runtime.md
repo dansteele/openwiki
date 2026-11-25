@@ -12,8 +12,10 @@ tags:
   - langchain
 verified:
   - by: openwiki/0.9.0
-    at: 2026-11-11T08:06:00.631Z
+    at: 2026-11-25T08:06:10.482Z
 sources:
+  - id: openwiki-source-34a5e30966a238b15ae701a9
+    resource: repo://.changeset/safe-file-glob-patterns.md
   - id: openwiki-source-0ad86abe7202c4e4d6897f34
     resource: repo://src/agent/agent-backend.ts
   - id: openwiki-source-f8b008ed89162a0e204fc02d
@@ -50,13 +52,15 @@ sources:
     resource: repo://src/integrations/mcp/stdio.ts
   - id: openwiki-source-ebe194cbeaa2594a6699f9a1
     resource: repo://src/model-availability.ts
+  - id: openwiki-source-0770fdf80fcdcaa96b06ee77
+    resource: repo://test/agent/conversation-history-offload.test.ts
   - id: openwiki-source-21fe6d4741a8225393c37599
     resource: repo://test/agent/create-model.test.ts
   - id: openwiki-source-6e76d6023798412a72871e94
     resource: repo://test/agent/entra-auth.test.ts
   - id: openwiki-source-d485c898eb60ebb173072eab
     resource: repo://test/agent/stream-redaction.test.ts
-generated: { by: "openwiki/0.9.0", at: "2026-11-11T08:06:00.631Z" }
+generated: { by: "openwiki/0.9.0", at: "2026-11-25T08:06:10.482Z" }
 ---
 
 # Agent Runtime, Models, and Middleware
@@ -169,7 +173,12 @@ For `gemini-enterprise`, the API surface is a function of the model id, not the 
 
 `createOpenWikiAgentGraph` constructs the DeepAgent from the initialized model. It creates an `OpenWikiLocalShellBackend` rooted at the run cwd (with `docsOnly` enabled for every command except chat), wraps it in a composite backend that adds fixed virtual mounts, and passes the middleware pipeline, connector tools, filesystem permissions, and command-specific system prompt to `createDeepAgent`. Before assembling the middleware it also resolves three pieces of localized runtime state: a translation plan (`resolveTranslationPlan`, defined for `update` runs only), the localized index heading labels (`resolveIndexLabels`) used by the deterministic directory indexes, and the localized fallback `conceptType` stamped on pages the OKF pass has to repair — both label maps fall back to English for languages not in the static tables.
 
-The composite backend (`createAgentBackend`) mounts two additional read-only virtual filesystems alongside the wiki backend: `/conversation_history/` for DeepAgents' history offload and `/skills/` for the bundled skills. A shared filesystem permission set additionally denies writes under both `/skills/**` and the conversation-history mount, and the composite backend converts a known upstream broad-glob recursion overflow into a bounded, model-facing "narrow your search" error instead of crashing the run.
+The composite backend (`createAgentBackend`) mounts two additional read-only virtual filesystems alongside the wiki backend: `/conversation_history/` for DeepAgents' history offload and `/skills/` for the bundled skills. A shared filesystem permission set (`AGENT_FILESYSTEM_PERMISSIONS`) additionally denies agent-layer writes under both `/skills/**` and the conversation-history mount. Before any mounted backend is consulted, both overridden search methods validate the glob pattern through `globPatternError`, which rejects two unsafe shapes outright and returns a model-facing `error` object rather than invoking the underlying matcher:
+
+- **Parenthesized patterns.** Any glob/grep pattern containing unescaped parentheses is rejected with `Parenthesized glob patterns are disabled for safety. Retry with simple wildcards or separate searches.` This is the mitigation for an unpatched picomatch denial-of-service vulnerability (see `.changeset/safe-file-glob-patterns.md`): the guard runs before the pattern reaches picomatch so a malicious pattern never triggers the DoS, and literal grep queries are unaffected because the check is on the glob/file-filter argument, not the search text.
+- **Excessive brace nesting.** `exceedsGlobBraceNesting` counts unescaped brace depth, and once it exceeds `MAX_GLOB_BRACE_NESTING` (100) the pattern is rejected with `Glob pattern nesting is too deep. Retry with a simpler pattern.`, preventing deeply nested `{...}` alternations from overwhelming recursive parsers before they run.
+
+Both checks are applied symmetrically: the `glob` override validates its pattern, and the `grep` override validates the file filter (`globPatternError(glob ?? '')`) before `super.grep` runs, so a parenthesized or over-nested file filter is refused the same way a bare glob is. Only after a pattern passes `globPatternError` does the composite backend fall back to the existing broad-glob recursion-overflow handling: if the underlying glob still throws a `RangeError` (`Maximum call stack size exceeded`), the override catches it and returns the bounded `Glob search was too broad. Retry with a narrower path or pattern.` error instead of crashing the run. Thus the new `globPatternError` validation runs *before* the broad-glob fallback, and a normal pattern such as `src/*.{ts,tsx}` still routes through to the backend.
 
 The middleware array is assembled conditionally. Personal (`local-wiki`) runs mount a filesystem middleware first — `createFilesystemMiddleware` over the composite backend with `AGENT_FILESYSTEM_PERMISSIONS` and the six `ls`/`read_file`/`glob`/`grep`/`write_file`/`edit_file` tools — because personal runs expose no shell tool regardless of command. Chat runs then mount nothing else. Non-chat runs append the optional translation middleware (when a plan resolved) followed by the OKF index middleware.
 
